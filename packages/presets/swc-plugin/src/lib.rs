@@ -19,6 +19,80 @@ fn capetalize(s: &str) -> String {
     format!("{}{}", (&s[..1].to_string()).to_uppercase(), &s[1..])
 }
 
+fn to_pascal_case(s: &str) -> String {
+    // The basic approach:
+    // 1. Split the input string into words based on case changes, underscores, etc.
+    // 2. Capitalize each word
+    // 3. Join the words back together
+
+    let mut result = String::new();
+    let mut current_word = String::new();
+
+    // Track previous character type to detect word boundaries
+    let mut prev_is_lowercase = false;
+    let mut prev_is_uppercase = false;
+    let mut prev_is_numeric = false;
+
+    for (i, c) in s.chars().enumerate() {
+        let is_delimiter = c == '_' || c == '-';
+        let is_uppercase = c.is_uppercase();
+        let is_lowercase = c.is_lowercase();
+        let is_numeric = c.is_numeric();
+
+        // Handle delimiters - finish the current word
+        if is_delimiter {
+            if !current_word.is_empty() {
+                result.push_str(&capitalize_word(&current_word));
+                current_word.clear();
+            }
+        }
+        // Detect camelCase boundary (lowercase followed by uppercase)
+        else if i > 0 && is_uppercase && prev_is_lowercase {
+            result.push_str(&capitalize_word(&current_word));
+            current_word.clear();
+            current_word.push(c);
+        }
+        // Detect "acronym end" boundary (multiple uppercase followed by lowercase: HTTPRequest -> HTTP/Request)
+        else if i > 0 && is_lowercase && prev_is_uppercase && i >= 2 {
+            // Check if we have at least 2 uppercase chars in sequence
+            let last_char = current_word.chars().last().unwrap();
+            current_word.pop(); // Remove the last char
+
+            if !current_word.is_empty() {
+                result.push_str(&capitalize_word(&current_word));
+                current_word.clear();
+            }
+
+            current_word.push(last_char);
+            current_word.push(c);
+        }
+        // Normal character - add to current word
+        else {
+            current_word.push(c);
+        }
+
+        // Update previous character state
+        prev_is_lowercase = is_lowercase;
+        prev_is_uppercase = is_uppercase;
+        prev_is_numeric = is_numeric;
+    }
+
+    // Add the final word if there is one
+    if !current_word.is_empty() {
+        result.push_str(&capitalize_word(&current_word));
+    }
+
+    result
+}
+
+fn capitalize_word(word: &str) -> String {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str().to_lowercase().as_str(),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -51,30 +125,32 @@ impl GraphQLVisitor {
     }
 
     fn get_relative_import_path(&self, path_end: &str) -> String {
-        // using PathBuf to add the relative path to the artifact directory
+        // Build the full path to the current file
         let mut file_full_path = PathBuf::from(&self.options.cwd);
         file_full_path.push(&self.options.filename);
         let file_s_dirname = file_full_path.parent().unwrap();
 
-        // The resolved artifact directory as seen from the current running SWC plugin working directory
-        let resolved_artifact_directory =
-            if Path::new(&self.options.artifact_directory).is_relative() {
-                let mut cwd = PathBuf::from(&self.options.cwd);
-                cwd.push(&self.options.artifact_directory);
-                cwd.to_string_lossy().to_string()
-            } else {
-                self.options.artifact_directory.to_string()
-            };
+        // Resolve the artifact directory
+        let mut resolved_artifact_directory = if Path::new(&self.options.artifact_directory).is_relative() {
+            let mut cwd = PathBuf::from(&self.options.cwd);
+            cwd.push(&self.options.artifact_directory);
+            cwd
+        } else {
+            PathBuf::from(&self.options.artifact_directory)
+        };
 
-        let mut relative = diff_paths(resolved_artifact_directory, file_s_dirname).unwrap();
+        // Add the file (e.g. graphql.ts) to the artifact directory
+        resolved_artifact_directory.push(path_end);
 
-        let start_of_path = "./";
+        // Compute the relative path from the file's directory to the artifact file
+        let relative = diff_paths(&resolved_artifact_directory, file_s_dirname)
+            .unwrap_or_else(|| panic!(
+                "Could not compute relative path from {:?} to {:?}",
+                file_s_dirname, resolved_artifact_directory
+            ));
 
-        // e.g. add 'graphql' to relative path
-        relative.push(path_end);
-
-        let platform_specific_path = start_of_path.to_string() + relative.to_str().unwrap();
-        platform_specific_path.replace('\\', "/")
+        // Convert to string and normalize separators
+        relative.to_str().unwrap().replace("\\", "/")
     }
 }
 
@@ -132,25 +208,25 @@ impl VisitMut for GraphQLVisitor {
 
                     let operation_name = match first_definition {
                         graphql_parser::query::Definition::Fragment(fragment) => {
-                            fragment.name.to_string() + "FragmentDoc"
+                            to_pascal_case(&fragment.name) + "FragmentDoc"
                         }
                         graphql_parser::query::Definition::Operation(op) => match op {
                             graphql_parser::query::OperationDefinition::Query(query) => {
                                 match query.name {
-                                    Some(name) => name.to_string() + "Document",
+                                    Some(name) => to_pascal_case(&name) + "Document",
                                     None => return,
                                 }
                             }
                             graphql_parser::query::OperationDefinition::Mutation(mutation) => {
                                 match mutation.name {
-                                    Some(name) => name.to_string() + "Document",
+                                    Some(name) => to_pascal_case(&name) + "Document",
                                     None => return,
                                 }
                             }
                             graphql_parser::query::OperationDefinition::Subscription(
                                 subscription,
                             ) => match subscription.name {
-                                Some(name) => name.to_string() + "Document",
+                                Some(name) => to_pascal_case(&name) + "Document",
                                 None => return,
                             },
                             _ => return,
@@ -158,10 +234,10 @@ impl VisitMut for GraphQLVisitor {
                     };
 
                     self.graphql_operations_or_fragments_to_import
-                        .push(capetalize(&operation_name));
+                        .push(operation_name.clone());
 
                     // now change the call expression to a Identifier
-                    let new_expr = Expr::Ident(quote_ident!(capetalize(&operation_name)).into());
+                    let new_expr = Expr::Ident(quote_ident!(operation_name.clone()).into());
 
                     *init = Box::new(new_expr);
                 }
@@ -177,7 +253,7 @@ impl VisitMut for GraphQLVisitor {
             return;
         }
 
-        let platform_specific_path = self.get_relative_import_path("graphql");
+        let platform_specific_path = self.get_relative_import_path("graphql.ts");
 
         // Add import after any "use client" directive, since it must come before any other expression
         let mut index = 0;
